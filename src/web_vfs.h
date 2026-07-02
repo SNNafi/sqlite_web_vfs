@@ -605,6 +605,20 @@ class VFS : public SQLiteVFS::Wrapper {
                 no_dbi = true;
             }
         }
+        // When set, the remote file is an encrypted (e.g. SQLCipher) database whose
+        // header is ciphertext/salt, not a plaintext SQLite header. Skip the header
+        // magic + geometry validation so the raw bytes are served and the caller's
+        // codec can decrypt above the VFS. The real file size still comes from the
+        // HTTP content-range; page_size (only a prefetch hint) is left at its default.
+        bool encrypted = sqlite3_uri_boolean(zName, "web_encrypted", 0);
+        const char *env_encrypted = getenv("SQLITE_WEB_ENCRYPTED");
+        if (env_encrypted && *env_encrypted) {
+            errno = 0;
+            unsigned long env_encrypted_i = strtoul(env_encrypted, nullptr, 10);
+            if (errno == 0 && env_encrypted_i > 0) {
+                encrypted = true;
+            }
+        }
         const char *encoded_dbi_uri =
             no_dbi ? nullptr : sqlite3_uri_parameter(zName, "web_dbi_url");
 
@@ -657,7 +671,8 @@ class VFS : public SQLiteVFS::Wrapper {
             // read main database header
             unsigned long long file_size = 0, page_size = 0;
             std::string db_header;
-            rc = FetchDatabaseHeader(log_, uri, curlpool.get(), file_size, page_size, db_header);
+            rc = FetchDatabaseHeader(log_, uri, curlpool.get(), file_size, page_size, db_header,
+                                     encrypted);
             if (rc != SQLITE_OK) {
                 return rc;
             }
@@ -731,7 +746,8 @@ class VFS : public SQLiteVFS::Wrapper {
 
     int FetchDatabaseHeader(SQLiteVFS::Logger &log_, const std::string &uri,
                             HTTP::CURLpool *connpool, unsigned long long &db_file_size,
-                            unsigned long long &page_size, std::string &db_header) {
+                            unsigned long long &page_size, std::string &db_header,
+                            bool encrypted = false) {
         // GET range: bytes=0-99 to read the database file's header and detect its size.
         db_file_size = page_size = 0;
         db_header.clear();
@@ -761,7 +777,8 @@ class VFS : public SQLiteVFS::Wrapper {
             return SQLITE_CANTOPEN;
         }
         if (db_header.size() != 100 ||
-            db_header.substr(0, 16) != std::string("SQLite format 3\000", 16)) {
+            (!encrypted &&
+             db_header.substr(0, 16) != std::string("SQLite format 3\000", 16))) {
             last_error_ = "[" + filename + "] remote content isn't a SQLite3 database file";
             SQLITE_VFS_LOG(1, last_error_)
             return SQLITE_CORRUPT;
@@ -794,27 +811,35 @@ class VFS : public SQLiteVFS::Wrapper {
             return SQLITE_IOERR_READ;
         }
 
-        // read the page size & page count from the header; their product should equal file size.
-        // https://github.com/sqlite/sqlite/blob/8d889afc0d81839bde67731d14263026facc89d1/src/shell.c.in#L5451-L5485
-        page_size = (uint8_t(db_header[16]) << 8) + uint8_t(db_header[17]);
-        if (page_size == 1) {
-            page_size = 65536;
-        }
-        uint32_t page_count = 0;
-        for (int ofs = 28; ofs < 32; ++ofs) {
-            page_count <<= 8;
-            page_count += uint8_t(db_header[ofs]);
-        }
-        SQLITE_VFS_LOG(4, "[" << filename << "] database geometry detected: " << db_file_size
-                              << " bytes = " << page_size << " bytes/page * " << page_count
-                              << " pages (" << (t.micros() / 1000) << "ms)")
-        if (page_size < 512 || page_size > 65536 || page_count == 0 ||
-            db_file_size != page_size * page_count) {
-            last_error_ = "[" + filename +
-                          "] database corrupt or truncated; content-range file size doesn't "
-                          "match in-header database size";
-            SQLITE_VFS_LOG(1, last_error_)
-            return SQLITE_CORRUPT;
+        if (!encrypted) {
+            // read the page size & page count from the header; their product should equal file size.
+            // https://github.com/sqlite/sqlite/blob/8d889afc0d81839bde67731d14263026facc89d1/src/shell.c.in#L5451-L5485
+            page_size = (uint8_t(db_header[16]) << 8) + uint8_t(db_header[17]);
+            if (page_size == 1) {
+                page_size = 65536;
+            }
+            uint32_t page_count = 0;
+            for (int ofs = 28; ofs < 32; ++ofs) {
+                page_count <<= 8;
+                page_count += uint8_t(db_header[ofs]);
+            }
+            SQLITE_VFS_LOG(4, "[" << filename << "] database geometry detected: " << db_file_size
+                                  << " bytes = " << page_size << " bytes/page * " << page_count
+                                  << " pages (" << (t.micros() / 1000) << "ms)")
+            if (page_size < 512 || page_size > 65536 || page_count == 0 ||
+                db_file_size != page_size * page_count) {
+                last_error_ = "[" + filename +
+                              "] database corrupt or truncated; content-range file size doesn't "
+                              "match in-header database size";
+                SQLITE_VFS_LOG(1, last_error_)
+                return SQLITE_CORRUPT;
+            }
+        } else {
+            // Encrypted/opaque: geometry is ciphertext. Trust the content-range size and
+            // let the codec validate pages (e.g. SQLCipher per-page HMAC) above the VFS.
+            SQLITE_VFS_LOG(4, "[" << filename << "] encrypted/opaque header; skipping SQLite "
+                                  << "geometry checks (" << db_file_size << " bytes, "
+                                  << (t.micros() / 1000) << "ms)")
         }
         return SQLITE_OK;
     }

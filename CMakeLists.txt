@@ -36,6 +36,11 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     add_library(web_vfs SHARED src/web_vfs.cc src/web_vfs.h src/SQLiteVFS.h src/ThreadPool.h src/HTTP.h)
     SET_TARGET_PROPERTIES(web_vfs PROPERTIES PREFIX "")
     target_link_libraries(web_vfs PRIVATE pthread dl)  # EXCLUDE curl given HTTP_LAZYCURL -- see src/HTTP.h
+    if(APPLE)
+        # sqlite3 symbols are provided by the host process loading the extension at runtime;
+        # macOS/arm64 requires explicitly allowing undefined symbols.
+        target_link_options(web_vfs PRIVATE -undefined dynamic_lookup)
+    endif()
 
     FetchContent_Declare(
         catch
@@ -44,8 +49,13 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     )
     FetchContent_MakeAvailable(catch)
     include_directories(${catch_SOURCE_DIR}/single_include)
+    find_path(MICROHTTPD_INCLUDE_DIR microhttpd.h)
+    find_library(MICROHTTPD_LIBRARY microhttpd)
     add_executable(local_stress_test test/local_stress_test.cc test/test_httpd.cc test/test_httpd.h)
-    target_link_libraries(local_stress_test PRIVATE sqlite3 curl microhttpd pthread dl)
+    if(MICROHTTPD_INCLUDE_DIR)
+        target_include_directories(local_stress_test PRIVATE ${MICROHTTPD_INCLUDE_DIR})
+    endif()
+    target_link_libraries(local_stress_test PRIVATE sqlite3 curl ${MICROHTTPD_LIBRARY} pthread dl)
 
     include(CTest)
     enable_testing()
