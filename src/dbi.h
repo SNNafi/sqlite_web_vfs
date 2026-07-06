@@ -84,7 +84,13 @@ class dbiHelper {
             azDirs[1] = getenv("TMPDIR");
         while (1) {
             if (zDir != 0 && stat(zDir, &buf) == 0 && S_ISDIR(buf.st_mode) &&
+#ifdef _WIN32
+                // MSVC _access rejects the POSIX W_OK|X_OK (03) mode (dirs have no
+                // exec bit and it triggers the invalid-parameter handler); check W_OK.
+                access(zDir, 02) == 0) {
+#else
                 access(zDir, 03) == 0) {
+#endif
                 return zDir;
             }
             if (i >= sizeof(azDirs) / sizeof(azDirs[0]))

@@ -67,6 +67,8 @@ CURLcode global_init() { return curl_global_init(CURL_GLOBAL_ALL); }
 CURLcode global_init() {
 #if defined(__APPLE__)
     static const char *libname[] = {"libcurl.4.dylib", "libcurl.dylib"};
+#elif defined(_WIN32)
+    static const char *libname[] = {"libcurl-4.dll", "libcurl.dll", "libcurl-x64.dll", "curl.dll"};
 #else
     static const char *libname[] = {"libcurl.so.4", "libcurl.so"};
 #endif

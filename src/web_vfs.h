@@ -563,7 +563,19 @@ class VFS : public SQLiteVFS::Wrapper {
     std::string last_error_;
 
     int Open(const char *zName, sqlite3_file *pFile, int flags, int *pOutFlags) override {
-        if (!zName || strcmp(zName, "/__web__")) {
+        // The magic filename is "/__web__" on POSIX, but SQLite's Windows URI parser
+        // rewrites file:/__web__ into a drive-qualified path like "C:\__web__". Match on the
+        // basename so the sentinel is recognized on every platform (no real database is
+        // opened through this VFS with the basename "__web__").
+        const char *base = zName;
+        if (zName) {
+            for (const char *p = zName; *p; ++p) {
+                if (*p == '/' || *p == '\\') {
+                    base = p + 1;
+                }
+            }
+        }
+        if (!zName || strcmp(base, "__web__")) {
             return wrapped_->xOpen(wrapped_, zName, pFile, flags, pOutFlags);
         }
 
